@@ -1,79 +1,133 @@
-// Replace with your actual Blynk details
-#define BLYNK_TEMPLATE_ID "YourTemplateID"
-#define BLYNK_TEMPLATE_NAME "Health Monitor"
-#define BLYNK_AUTH_TOKEN "YourAuthToken"
-
 #include <Wire.h>
 #include "MAX30105.h"
-#include "heartRate.h"
-#include <Adafruit_MLX90614.h>
-#include <WiFi.h>
-#include <WiFiClient.h>
-#include <BlynkSimpleEsp32.h>
+#include "spo2_algorithm.h"
+#include <WiFi.h>           // Use <ESP8266WiFi.h> if using ESP8266
+#include <BlynkSimpleEsp32.h>  // Use appropriate board-specific Blynk library
 
-char auth[] = BLYNK_AUTH_TOKEN;
-char ssid[] = "YourSSID";
-char pass[] = "YourWiFiPassword";
+char auth[] = "Your_Blynk_Auth_Token";  // Replace with your Blynk Auth Token
+char ssid[] = "Your_WiFi_SSID";         // Replace with your WiFi SSID
+char pass[] = "Your_WiFi_Password";     // Replace with your WiFi password
 
 MAX30105 particleSensor;
-Adafruit_MLX90614 mlx = Adafruit_MLX90614();
-BlynkTimer timer;
+#define MAX_BRIGHTNESS 255
 
-long lastBeat = 0;
-const byte RATE_SIZE = 4;
-byte rates[RATE_SIZE];
-byte rateSpot = 0;
-float beatsPerMinute;
-int beatAvg;
+uint32_t irBuffer[100];
+uint32_t redBuffer[100];
 
-void readSensors() {
-  float temp = mlx.readObjectTempC();
-  Blynk.virtualWrite(V0, temp);  // Send temp to Blynk
+int32_t bufferLength;
+int32_t spo2;
+int8_t validSPO2;
+int32_t heartRate;
+int8_t validHeartRate;
 
-  long irValue = particleSensor.getIR();
+byte pulseLED = 11;
+byte readLED = 13;
 
-  if (checkForBeat(irValue)) {
-    long delta = millis() - lastBeat;
-    lastBeat = millis();
-
-    beatsPerMinute = 60 / (delta / 1000.0);
-    rates[rateSpot++] = (byte)beatsPerMinute;
-    rateSpot %= RATE_SIZE;
-
-    beatAvg = 0;
-    for (byte x = 0; x < RATE_SIZE; x++) beatAvg += rates[x];
-    beatAvg /= RATE_SIZE;
-
-    Serial.print("BPM: ");
-    Serial.println(beatAvg);
-
-    Blynk.virtualWrite(V1, beatAvg);
-  } else {
-    Serial.println("Waiting for heartbeat...");
-  }
-}
-
-void setup() {
+void setup()
+{
   Serial.begin(115200);
-  Wire.begin();
+  pinMode(pulseLED, OUTPUT);
+  pinMode(readLED, OUTPUT);
 
-  mlx.begin();
+  Blynk.begin(auth, ssid, pass);  // Connect to Blynk
 
-  if (!particleSensor.begin(Wire, I2C_SPEED_STANDARD)) {
-    Serial.println("MAX30102 not found. Check wiring.");
+  if (!particleSensor.begin(Wire, I2C_SPEED_FAST))
+  {
+    Serial.println(F("MAX30105 was not found. Please check wiring/power."));
     while (1);
   }
 
-  particleSensor.setup(); // Use default settings
-  particleSensor.setPulseAmplitudeRed(0x0A);  // Red LED
-  particleSensor.setPulseAmplitudeIR(0x0A);   // IR LED
+  Serial.println(F("Attach sensor to finger with rubber band. Press any key to start conversion"));
+  while (Serial.available() == 0) ;
+  Serial.read();
 
-  Blynk.begin(auth, ssid, pass);
-  timer.setInterval(2000L, readSensors);
+  byte ledBrightness = 60;
+  byte sampleAverage = 4;
+  byte ledMode = 2;
+  byte sampleRate = 100;
+  int pulseWidth = 411;
+  int adcRange = 4096;
+
+  particleSensor.setup(ledBrightness, sampleAverage, ledMode, sampleRate, pulseWidth, adcRange);
 }
 
-void loop() {
-  Blynk.run();
-  timer.run();
-}
+void loop()
+{
+  Blynk.run();  // Required to keep Blynk connection alive
 
+  bufferLength = 100;
+  for (byte i = 0; i < bufferLength; i++)
+  {
+    while (particleSensor.available() == false)
+      particleSensor.check();
+
+    redBuffer[i] = particleSensor.getRed();
+    irBuffer[i] = particleSensor.getIR();
+    particleSensor.nextSample();
+
+    Serial.print(F("red="));
+    Serial.print(redBuffer[i], DEC);
+    Serial.print(F(", ir="));
+    Serial.println(irBuffer[i], DEC);
+  }
+
+  maxim_heart_rate_and_oxygen_saturation(irBuffer, bufferLength, redBuffer, &spo2, &validSPO2, &heartRate, &validHeartRate);
+
+  static int hrWindow[4] = {0};
+  static byte hrIndex = 0;
+  int hrAvg = 0;
+
+  while (1)
+  {
+    for (byte i = 25; i < 100; i++)
+    {
+      redBuffer[i - 25] = redBuffer[i];
+      irBuffer[i - 25] = irBuffer[i];
+    }
+
+    for (byte i = 75; i < 100; i++)
+    {
+      while (particleSensor.available() == false)
+        particleSensor.check();
+
+      digitalWrite(readLED, !digitalRead(readLED));
+
+      redBuffer[i] = particleSensor.getRed();
+      irBuffer[i] = particleSensor.getIR();
+      particleSensor.nextSample();
+
+      Serial.print(F("red="));
+      Serial.print(redBuffer[i], DEC);
+      Serial.print(F(", ir="));
+      Serial.print(irBuffer[i], DEC);
+
+      if (validHeartRate && heartRate >= 40 && heartRate <= 180) {
+        hrWindow[hrIndex++] = heartRate;
+        hrIndex %= 4;
+
+        hrAvg = 0;
+        for (int j = 0; j < 4; j++) hrAvg += hrWindow[j];
+        hrAvg /= 4;
+
+        Serial.print(F(", HR="));
+        Serial.print(hrAvg);
+        Blynk.virtualWrite(V1, hrAvg);  // Send Average HR to V1
+      } else {
+        Serial.print(F(", HR=INVALID"));
+      }
+
+      Serial.print(F(", HRvalid="));
+      Serial.print(validHeartRate, DEC);
+
+      Serial.print(F(", SPO2="));
+      Serial.print(spo2, DEC);
+      Serial.print(F(", SPO2Valid="));
+      Serial.println(validSPO2, DEC);
+
+      if (validSPO2 && spo2 >= 80 && spo2 <= 100)
+        Blynk.virtualWrite(V2, spo2);  // Send SpO2 to V2
+    }
+
+    maxim_heart_rate_and_oxygen_saturation(irBuffer, bufferLength, redBuffer, &spo2, &validSPO2, &heartRate, &validHeartRate);
+  }
+}
