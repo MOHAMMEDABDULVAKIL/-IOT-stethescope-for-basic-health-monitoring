@@ -77,47 +77,64 @@ void loop()
   maxim_heart_rate_and_oxygen_saturation(irBuffer, bufferLength, redBuffer, &spo2, &validSPO2, &heartRate, &validHeartRate);
 
   //Continuously taking samples from MAX30102.  Heart rate and SpO2 are calculated every 1 second
+  //Continuously taking samples from MAX30102.  Heart rate and SpO2 are calculated every 1 second
   while (1)
   {
-    //dumping the first 25 sets of samples in the memory and shift the last 75 sets of samples to the top
+    static int hrWindow[4] = {0};
+    static byte hrIndex = 0;
+    int hrAvg = 0;
+  
+    //dump the first 25 sets of samples in the memory and shift the last 75 sets of samples to the top
     for (byte i = 25; i < 100; i++)
     {
       redBuffer[i - 25] = redBuffer[i];
       irBuffer[i - 25] = irBuffer[i];
     }
-
+  
     //take 25 sets of samples before calculating the heart rate.
     for (byte i = 75; i < 100; i++)
     {
-      while (particleSensor.available() == false) //do we have new data?
-        particleSensor.check(); //Check the sensor for new data
-
-      digitalWrite(readLED, !digitalRead(readLED)); //Blink onboard LED with every data read
-
+      while (particleSensor.available() == false)
+        particleSensor.check();
+  
+      digitalWrite(readLED, !digitalRead(readLED));
+  
       redBuffer[i] = particleSensor.getRed();
       irBuffer[i] = particleSensor.getIR();
-      particleSensor.nextSample(); //We're finished with this sample so move to next sample
-
-      //send samples and calculation result to terminal program through UART
+      particleSensor.nextSample();
+  
+      // Show raw data
       Serial.print(F("red="));
       Serial.print(redBuffer[i], DEC);
       Serial.print(F(", ir="));
       Serial.print(irBuffer[i], DEC);
-
-      Serial.print(F(", HR="));
-      Serial.print(heartRate, DEC);
-
+  
+      // Validate and Smooth Heart Rate
+      if (validHeartRate && heartRate >= 40 && heartRate <= 180) {
+        hrWindow[hrIndex++] = heartRate;
+        hrIndex %= 4;
+  
+        hrAvg = 0;
+        for (int j = 0; j < 4; j++) hrAvg += hrWindow[j];
+        hrAvg /= 4;
+  
+        Serial.print(F(", HR="));
+        Serial.print(hrAvg);
+      } else {
+        Serial.print(F(", HR=INVALID"));
+      }
+  
       Serial.print(F(", HRvalid="));
       Serial.print(validHeartRate, DEC);
-
+  
       Serial.print(F(", SPO2="));
       Serial.print(spo2, DEC);
-
+  
       Serial.print(F(", SPO2Valid="));
       Serial.println(validSPO2, DEC);
     }
-
-    //After gathering 25 new samples recalculate HR and SP02
+  
+    // Recalculate HR and SpO2
     maxim_heart_rate_and_oxygen_saturation(irBuffer, bufferLength, redBuffer, &spo2, &validSPO2, &heartRate, &validHeartRate);
   }
 }
